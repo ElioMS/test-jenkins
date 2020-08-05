@@ -1,0 +1,68 @@
+pipeline {
+    agent any
+    environment {
+        PROJECT_ID = 'produccion-ucic'
+        CLUSTER_NAME = 'deployment'
+        LOCATION = 'us-central1-b'
+        CREDENTIALS_ID = 'GKEServiceAccount'
+        SERVICE_ACCOUNT = 'jenkinsgcpsecret'
+    }
+    stages {
+        stage("Checkout code") {
+            steps {
+                checkout scm
+            }
+        }
+        stage("test code") {
+            steps {
+                sh("./gradlew clean test")
+            }
+        }
+        stage("Build code") {
+            steps {
+                sh("./gradlew clean bootjar")
+            }
+        }
+        stage('SonarQube analysis') {
+            steps {
+                script{
+                    sh("./gradlew sonarqube")
+                }
+            }
+         }
+        stage("Build image") {
+            steps {
+                script {
+                     myapp = docker.build("gcr.io/produccion-ucic/websample:'${env.BUILD_ID}'")
+                     sh("docker tag gcr.io/produccion-ucic/websample:'${env.BUILD_ID}' gcr.io/produccion-ucic/websample:latest")
+                }
+            }
+        }
+        stage("Push image") {
+            steps {
+                script {
+                    withCredentials([file(credentialsId: 'jenkinsgcpsecret', variable: 'GC_key')]) {
+                        sh("gcloud auth activate-service-account --key-file='${GC_key}'")
+                        sh('gcloud auth configure-docker')
+                        sh("docker push gcr.io/'${env.PROJECT_ID}'/websample:'${env.BUILD_ID}'")
+                        sh("docker push gcr.io/'${env.PROJECT_ID}'/websample:latest")
+                    }
+                }
+            }
+        }
+        stage('Wait for Approval') {
+            steps{
+                timeout(time:30, unit:'SECONDS') {
+                    input message:'Approve deployment?', submitter: 'sre-approvers'
+                }
+            }
+        }
+        stage('Deploy to GKE PROD') {
+            steps{
+                sh("sed -i 's/websample:latest/websample:${env.BUILD_ID}/g' deployment.yaml")
+                sh('cat deployment.yaml')
+                step([$class: 'KubernetesEngineBuilder', projectId: env.PROJECT_ID, clusterName: env.CLUSTER_NAME, location: env.LOCATION, manifestPattern: 'deployment.yaml', credentialsId: env.CREDENTIALS_ID, verifyDeployments: true])
+            }
+        }
+    }
+}
